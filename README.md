@@ -1,4 +1,2 @@
 # TURF Analysis
-Exhaustive TURF Analysis
-
-Tool takes takes utilities file and evaluates all possible combinations of concepts
+Fast TURF Analysis using stepwise + swapping method and parallel processing in R.
