@@ -1,4 +1,5 @@
 library(Matrix)
+library(qlcMatrix)
 library(data.table)
 library(fastDummies)
 library(future.apply)
@@ -6,17 +7,20 @@ library(future.apply)
 `%ni%` <- Negate(`%in%`)
 
 # Function for generating combinations' dummies
-get.dummies <- function(nck,lst_cte,
-                        lst_fixed,lst_comp){
+get.dummies <- function(nck,lst_cte,lst_fixed,lst_comp,prohibs=TRUE){
   
   if (length(nck)==1){
     colnames(nck) <- "X"
   }
   
+  for (proh in prohs){
+    nck <- nck[!apply(nck,1,function(comb) all(proh %in% comb)),]
+  }
+  
   nck <- dummy_cols(nck,select_columns=colnames(nck),
                     remove_selected_columns=TRUE)
   
-  head <- unique(gsub("X[0-9]", "", colnames(nck)))
+  head <- unique(gsub("X[0-9]+", "", colnames(nck)))
   
   nck <- sapply(head, 
                 function(x)rowSums(nck[endsWith(colnames(nck), x)])) %>% data.frame()
@@ -52,8 +56,7 @@ cbind2 <- function (...){
 }
 
 # Iteration of TURF Analysis
-turf.iter <- function(i,nck_bin,
-                      ttest.data=FALSE){
+turf.iter <- function(i,nck_bin,utils,prefix,ttest.data=FALSE){
   
   comb <- nck_bin[i,]
   
@@ -67,8 +70,17 @@ turf.iter <- function(i,nck_bin,
 
   colnames(items) <- 1:ncol(items)
   
-  case_util <- mapply(`*`, util, comb*prod_wei) %>% 
-    Matrix(data=.,sparse=TRUE) #data.frame()
+  case_util <- mapply(`*`, util, 
+                      comb*prod_wei) %>% Matrix(data=.,sparse=TRUE)
+  
+  if (firstChoice) {
+    
+    case_max  <- rowMax(case_util)
+    case_util <- apply(case_util,2,
+                       function(col) ifelse(col == case_max,1,0)) %>% Matrix(data=.,
+                                                                             sparse=TRUE)
+    
+  }
   
   case_sop <- wei * (case_util / rowSums(case_util))
   
@@ -94,12 +106,11 @@ turf.iter <- function(i,nck_bin,
 } 
 
 # Function that runs TURF Analysis
-run.turf <- function(nck_bin,
-                     ttest.data=FALSE){
+run.turf <- function(nck_bin,utils,prefix,ttest.data=FALSE){
   
   n_comb <- nrow(nck_bin)
   results <- future_lapply(1:n_comb, 
-                           function(i) turf.iter(i,nck_bin,ttest.data)) 
+                           function(i) turf.iter(i,nck_bin,utils,prefix,ttest.data)) 
   
   if (ttest.data) {
     
@@ -122,25 +133,27 @@ run.turf <- function(nck_bin,
 }
 
 # Function for determining "optimal" k-partition
-steps <- function(array,m,k,
-                  threshold=60000){
+steps <- function(array,m,k,threshold=60000){
+    
+  # Comments
+  mCk <- function(m,k) prod(setdiff(1:m, 1:(m-k))) / prod(1:k)
   
-  nCk <- function(m,k) prod(setdiff(1:m, 1:(m-k))) / prod(1:k)
-  
-  if (nCk(m,k) <= threshold){
+  # Comments
+  if (mCk(m,k) <= threshold) {
     array <- append(array,k)
     return(array[order(array)])
   } else {
     ki <- sapply(1:(k-1), 
-                 function(i) nCk(m,i)) %>% ifelse(.<=threshold,.,0) %>% which.max()
+                 function(i) mCk(m,i)) %>% ifelse(.<=threshold,.,0) %>% which.max()
+    ki <- if (k - ki > 1) ki else ki - 1=
     array <- append(array,ki)
     steps(array,m-ki,k-ki)
   }
+  
 }
 
 # Function that implements greedy approach for TURF Analysis 
-stepwise.turf <- function(k,lst_cte,lst_fixed,
-                          lst_comp,start_from=NULL){
+stepwise.turf <- function(k,utils,lst_cte,lst_fixed,lst_comp,prefix,start_from=NULL){
   
   m <- length(setdiff(lst_cte,lst_fixed))
   
@@ -174,7 +187,7 @@ stepwise.turf <- function(k,lst_cte,lst_fixed,
     
     if (i < length(k_iter)) {
       
-      results <- run.turf(nck_bin)
+      results <- run.turf(nck_bin,utils,prefix)
       
       best <- results[1,2:ncol(results)]
       iter_fixed <- sapply(best,
@@ -182,7 +195,7 @@ stepwise.turf <- function(k,lst_cte,lst_fixed,
       
     } else {
       
-      results <- run.turf(nck_bin)
+      results <- run.turf(nck_bin,utils,prefix)
       
     }
     
@@ -191,7 +204,7 @@ stepwise.turf <- function(k,lst_cte,lst_fixed,
   if (stepwise) {
     
     results <- results %>% 
-      rbind(.,run.swapping(results,lst_cte,lst_fixed,lst_comp))
+      rbind(.,run.swapping(results,utils,lst_cte,lst_fixed,lst_comp,prefix))
     
     results <- results[!duplicated(results),]
     results <- results[order(results$SoP,decreasing=TRUE),]
@@ -208,8 +221,7 @@ stepwise.turf <- function(k,lst_cte,lst_fixed,
 }
 
 # Iteration of swapping algorithm
-swap <- function(comb,lst_cte,
-                 lst_fixed,lst_comp){
+swap <- function(comb,lst_cte,lst_fixed,lst_comp){
   
   comb <- comb[,2:ncol(comb)]
   comb <- mapply(function(x) as.numeric(str_sub(x, start=nchar(prefix)+1) ), comb)
@@ -235,8 +247,7 @@ swap <- function(comb,lst_cte,
 }
 
 # Function that runs swapping
-run.swapping <- function(results,lst_cte,
-                         lst_fixed,lst_comp){
+run.swapping <- function(results,utils,lst_cte,lst_fixed,lst_comp,prefix){
   
   top100 <- min(nrow(results),100)
   
@@ -250,14 +261,14 @@ run.swapping <- function(results,lst_cte,
   swap_bin <- swapped %>% get.dummies(.,lst_cte,lst_fixed,lst_comp)
   swap_bin$none <- if (None) 1 else 0
   
-  output <- run.turf(swap_bin)
+  output <- run.turf(swap_bin,utils,prefix)
 
   return(output)
 
 }
 
 # Function that performs a paired t-test over the top K combos
-paired.ttest <- function(results,top,alpha) {
+paired.ttest <- function(results,utils,top,alpha,prefix) {
   
   results <- results[1:min(nrow(results),top),]
   rn <- rownames(results)
@@ -266,11 +277,11 @@ paired.ttest <- function(results,top,alpha) {
     mapply(function(x) as.numeric(str_sub(x, start=nchar(prefix)+1)),.)
   
   results_bin <- results %>% 
-    data.frame() %>% get.dummies(.,lst_cte,lst_fixed,lst_comp)
+    data.frame() %>% get.dummies(.,lst_cte,lst_fixed,lst_comp,prohibs=F)
   
   results_bin$none <- if (None) 1 else 0
   
-  ttest_data <- run.turf(results_bin,ttest.data=TRUE)
+  ttest_data <- run.turf(results_bin,utils,prefix,ttest.data=TRUE)
   
   output <- ttest_data[[1]]
   ttest_data <- ttest_data[[2]]
